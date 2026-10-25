@@ -1,0 +1,191 @@
+---
+title: "Nautilus Trader adapter"
+sidebarTitle: "Nautilus Trader"
+description: "Run Nautilus Trader strategies on ParamX: tiles as instruments, live books, and signed orders."
+---
+
+`nautilus_paramx` connects [Nautilus Trader](https://nautilustrader.io) 2.0 to ParamX.
+Tiles become Nautilus instruments. The data client streams their books, quotes and trades,
+and the execution client signs orders with your trading key. The same strategy code runs:
+- paper, in Nautilus's sandbox, against ParamX's live books;
+- live on devnet, the paper-trading exchange with test USDC;
+- live on mainnet.
+
+It's a Python package on Nautilus's out-of-tree adapter interface
+(`nautilus_trader.live.clients`), and needs `nautilus_trader>=2.0.0rc5` and Python 3.12+.
+
+## Install
+
+From a checkout of [nautilus-paramx](https://github.com/paramxxyz/nautilus-paramx):
+
+```sh
+git clone https://github.com/paramxxyz/nautilus-paramx
+uv add ./nautilus-paramx      # or: pip install ./nautilus-paramx
+```
+
+## An account
+
+Orders need an account whose trading key is registered. `paramx-setup`, this repo's CLI,
+makes one:
+
+```sh
+cargo build --release
+B=target/release/paramx-setup
+$B keys && $B register          # mainnet: then send USDC on Sui and `$B deposit 100`
+$B --devnet keys && $B --devnet register && $B --devnet faucet && $B --devnet deposit 1000
+```
+
+The execution client reads the key file `paramx-setup` writes:
+- `.paramx/keys.json` on mainnet;
+- `.paramx/devnet-keys.json` on devnet;
+- or any path, with `keys_file`.
+
+Market data needs no account.
+
+## Instruments
+
+**Tiles.** Each grid tile is a `BinaryOption`:
+- **Id:** `BTC-5M-20260927T2300-109000-109100.PARAMX`, meaning the underlying, the grid, the window's UTC start, and the min and max strike in USD.
+- **`raw_symbol`:** the decimal contract id.
+- **Units:** USDC; prices from 0 to 1, and sizes, both to 6 decimals.
+- **Timing:** `activation_ns` and `expiration_ns` are the window.
+- **Fees:** `taker_fee` 0.003 and `maker_fee` 0.
+- **`info`:** `contract_id`, `underlying_id`, `grid`, the strikes, and `start`/`end` in Unix seconds.
+
+A share pays $1 if the underlying trades inside the range during the window
+([instruments](/instruments)).
+
+**Underlyings.** Each underlying is an `IndexInstrument`, `BTC.PARAMX`. Its `info` holds
+its grids (window length and price step), so a strategy can build tile ids itself (see
+`nautilus_paramx.tiles` and `examples/mm_strategy.py`).
+
+**Which tiles load** is set in `ParamxDataClientConfig`:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `environment` | `mainnet` | or `devnet` |
+| `instruments` | all listed | underlyings by symbol, e.g. `["BTC", "ETH"]` |
+| `grids` | `["5m", "1h"]` | `5m`, `1h`, `1d` |
+| `windows_ahead` | 2 | windows per grid, from the current one |
+| `bands` | 5 | price bands each side of the underlying's price |
+| `skip_closed` | true | leave out tiles entirely outside market hours (the exchange refuses them) |
+| `roll_interval_secs` | 30 | how often the tiles of new windows are added |
+
+**Loading and rolling:**
+- **Any tile works.** Subscribing to, or requesting, a tile outside the loaded set builds it from its id.
+- **Rolling:** every `roll_interval_secs`, the data client publishes the tiles of windows that have come into range.
+- **Settlement:** a tile you subscribe to with `subscribe_instrument_close` gets an `InstrumentClose` once it settles, priced 1 if touched and 0 if not.
+
+The market maker quotes upcoming windows: 5m tiles up to about an hour ahead, and
+the next hours and days. The current window's book is often empty.
+
+## Data
+
+| Nautilus subscription | ParamX channel | Notes |
+| --- | --- | --- |
+| `subscribe_book_deltas(tile, BookType.L2_MBP)` | `book` | each update is a full snapshot (a clear, then every level); stale versions are dropped |
+| `subscribe_quotes(tile)` | `top_of_book` | an empty side shows as bid 0 or ask 1, size 0 |
+| `subscribe_trades(tile)` | `trades` | aggressor from `taker_side` |
+| `subscribe_index_prices(BTC.PARAMX)` | `underlying_trades` | the underlying's last trade price |
+| `subscribe_instrument_close(tile)` | `GET /v1/contracts/{id}` | after settlement |
+| `request_trades`, `request_book_snapshot`, `request_instrument(s)` | REST | |
+
+The WebSocket client:
+- reconnects with backoff, including on the server's restart close (1012);
+- resubscribes everything;
+- reconnects if a message's `seq` skips.
+
+## Execution
+
+`ParamxExecClientConfig(environment=..., keys_file=..., default_expiry_secs=3600, account_id="PARAMX-001")`:
+a `MARGIN` account in USDC, with `NETTING` positions.
+
+| Nautilus | ParamX |
+| --- | --- |
+| `LIMIT`, GTC | `gtc` |
+| `LIMIT`, GTD | `gtc`, and the signed intent expires at `expire_time` |
+| `LIMIT`, IOC | `ioc` |
+| `LIMIT`, `post_only=True` | `post_only` (refused with `WOULD_CROSS` if it would match) |
+| `MARKET` | an IOC limit at 1 (buy) or 0.000001 (sell) |
+| FOK, DAY, stops, `modify_order`, brackets/OCO | not supported: denied, or modify rejected ("cancel and replace") |
+
+**Placing orders:**
+- **Totals:** a limit's price is per share, so the order's totals are rounded to micro-USDC: a buy's total down (it never pays more than its price), a sell's up.
+- **Expiry:** without GTD, an order expires at its tile's end or after `default_expiry_secs`, whichever is sooner.
+- **Idempotent submits:** the client order id is sent to ParamX, so a retried submit can't place twice.
+- **Shorts:** selling past zero opens a short, which locks $1 a share. Both sides of one tile can be quoted from flat.
+
+**Cancels:**
+- `cancel_order` signs a cancel with the order's own nonce and expiry.
+- `cancel_all_orders` uses the exchange's cancel-all, one signature for the whole tile.
+- `cancel_orders` uses cancel-batch.
+- A cancel takes the order off the book at once. Its signed intent stays valid until its expiry, but only the operator can submit fills, and only from the book. Short expiries keep that window small.
+
+**Batching.** The exchange allows 300 requests a minute per IP. Submits and cancels that
+arrive within 25 ms are sent as one batch request (`/orders/batch`, up to 20 orders;
+`/orders/cancel-batch`, up to 200), so a requote of many orders costs a few requests.
+
+**Events** come from the account's WebSocket channel:
+- **Fills** carry the liquidity side and the commission (0.30% of the total, for the taker only).
+- **Cancels and expiries,** including an IOC's dropped remainder.
+- **Cash,** reported as the account state.
+
+**Restarts.** With reconciliation on (`.with_reconciliation(reconciliation=True)`), a new
+node rebuilds its state from the exchange:
+- resting orders, from `/v1/accounts/{a}/orders`, which also returns what a cancel needs to sign;
+- positions, from `/positions`;
+- fills, from `/fills`.
+
+Orders found this way belong to Nautilus's `EXTERNAL` strategy. Cancel them with
+`cancel_all_orders(tile, strategy_only=False)`, or claim their instruments with
+`StrategyConfig(external_order_claims=[...])`.
+
+## Running it
+
+```python
+from nautilus_trader.common import Environment
+from nautilus_trader.live import LiveNode
+from nautilus_trader.model import TraderId
+from nautilus_paramx import (
+    PARAMX, ParamxDataClientConfig, ParamxDataClientFactory,
+    ParamxExecClientConfig, ParamxExecutionClientFactory,
+)
+
+node = (
+    LiveNode.builder("MY-BOT", TraderId.from_str("BOT-001"), Environment.LIVE)
+    .with_reconciliation(reconciliation=True)
+    .add_data_client(PARAMX, ParamxDataClientFactory,
+                     ParamxDataClientConfig(environment="devnet", instruments=["BTC"], grids=["1h"]))
+    .add_exec_client(PARAMX, ParamxExecutionClientFactory,
+                     ParamxExecClientConfig(environment="devnet"))
+    .build()
+)
+node.add_strategy(MyStrategy())
+node.run()
+```
+
+Pass the factory classes themselves, not instances. For paper trading, keep the data client and use
+`add_simulated_exec_client(PARAMX, SandboxExecutionClientFactory(), SandboxExecutionClientConfig(venue=Venue.from_str(PARAMX), account_type=AccountType.MARGIN, ...))`
+(see `examples/paper_mm.py`).
+
+## Examples
+
+| Script | What it does |
+| --- | --- |
+| `examples/stream.py` | books, quotes, trades and the index price for BTC tiles (data only) |
+| `examples/paper_mm.py` | a market maker in the sandbox on live mainnet books |
+| `examples/devnet_mm.py` | the same market maker live on devnet |
+| `examples/devnet_check.py` | every execution path on devnet, step by step (needs a second, taker account) |
+| `examples/reconcile_check.py` | `leave` an order resting, then `resume` in a new node: reconciled and cancelled |
+| `examples/mm_strategy.py` | the strategy: quotes the band at the price `window_offset` windows ahead, skews by inventory, rolls |
+
+## Limits and differences
+
+- **Tiles expire.** A strategy has to move to new windows as time passes, like `mm_strategy.py`'s roll.
+- **Settlement doesn't close Nautilus positions.** A settled tile pays out on the exchange, and the new cash arrives as an account update, but the position stays open in Nautilus. Use `InstrumentClose` to close your own records; the next restart's reconciliation matches the exchange.
+- **Big tiles** (the web app's multi-tile contracts) aren't mapped.
+- **Market hours:** tiles entirely outside an underlying's sessions can't be traded, and aren't loaded unless you ask for them by id.
+- **Nautilus 2.0 Python API:**
+  - `Strategy.cancel_order` and `modify_order` take a client order id, and `subscribe_book_deltas` needs a `BookType`;
+  - order lists come only from brackets, which ParamX doesn't support;
+  - use `node.handle().stop()` to stop a node from another thread.

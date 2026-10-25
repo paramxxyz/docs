@@ -1,0 +1,79 @@
+---
+title: "WebSocket"
+description: "Live books, top of book, the public tape, underlying prices and account events."
+---
+
+Connect to `wss://ws.paramx.xyz/v1` (devnet: `wss://ws.paramx.xyz/devnet/v1`). Every message is a JSON text frame.
+
+## Subscribing
+
+Client to server:
+
+```json
+{"op": "subscribe", "channel": "book", "contract_ids": ["3819…", "3820…"]}
+{"op": "unsubscribe", "channel": "book", "contract_ids": ["3819…"]}
+{"op": "subscribe", "channel": "top_of_book", "contract_ids": ["3819…"]}
+{"op": "subscribe", "channel": "book", "instrument_ids": [1]}
+{"op": "subscribe", "channel": "trades", "instrument_ids": [1]}
+{"op": "subscribe", "channel": "account", "addresses": ["0x4ba4…"]}
+{"op": "subscribe", "channel": "underlying_trades", "instrument_ids": [1, 2]}
+{"op": "ping"}
+```
+
+**By instrument:** `book`, `top_of_book` and `trades` also take `instrument_ids`, meaning every contract of those instruments, including tiles that are listed later. It counts as one subscription. It sends no snapshot, so load the current books from [`GET /v1/books?instrument_id=`](/api/http#get-v1books-instrument-id-grid) after subscribing.
+
+## Channels
+
+<AccordionGroup>
+  <Accordion title="book" defaultOpen>
+    After subscribing, the full book of each contract, then the full book again after every change. There are no deltas to apply.
+
+    ```json
+    {"channel": "book", "contract_id": "3819…", "bids": [["0.43", "15"]], "asks": [["0.47", "10"]], "ts": 1790000000123}
+    ```
+  </Accordion>
+  <Accordion title="top_of_book">
+    The same, for the best bid and ask only.
+
+    ```json
+    {"channel": "top_of_book", "contract_id": "3819…", "best_bid": {"price": "0.43", "amount": "15"}, "best_ask": null, "ts": 1790000000123}
+    ```
+  </Accordion>
+  <Accordion title="trades">
+    The exchange's public tape, one message per executed trade. There are no addresses; `taker_side` is the side that took liquidity.
+
+    ```json
+    {"channel": "trades", "trade_id": "…", "contract_id": "3819…", "underlying_id": 1, "price": "0.0158", "amount": "1", "total_price": "0.0158", "taker_side": "buy", "tx_digest": "8xdw…", "ts": 1790500279219, "seq": 12}
+    ```
+  </Accordion>
+  <Accordion title="underlying_trades">
+    The last trade on subscribe, then every trade of the underlying.
+
+    ```json
+    {"channel": "underlying_trades", "instrument_id": 1, "price": "84370.01", "size": "0.00044963", "side": "sell", "trade_id": "1099017880", "ts": 1790486235908}
+    ```
+  </Accordion>
+  <Accordion title="account">
+    An account's events: see [Account events](/api/account-events).
+  </Accordion>
+</AccordionGroup>
+
+**Acknowledgements:** `{"op": "subscribed" | "unsubscribed", "channel", …}`, echoing the subscription's key field, and `{"op": "pong"}`.
+
+**Errors:** `{"error": {"code", "message"}}`, e.g. `INVALID_INPUT` or `TOO_MANY_SUBSCRIPTIONS`.
+
+## Ordering and gaps
+
+**`seq`:** every data message carries its connection's `seq`: 1, 2, 3…, with no gaps. The server never skips a message (it disconnects a client that falls too far behind), so a gap means you missed something: reconnect, subscribe again, and reload from REST. Acknowledgements, pongs and errors don't carry `seq`.
+
+**`version`:** books and top of book carry a `version` that only rises per contract. Keep the newest per contract and drop anything older; a snapshot sent on subscribe can arrive after a newer live update.
+
+## Limits and keepalive
+
+- 2,000 subscriptions per connection, and at most 20 of them accounts;
+- 20 connections per IP;
+- a client that falls 8 MB behind is disconnected.
+
+The server pings every 30 seconds and drops connections that don't answer. On restart it closes connections with code 1012: reconnect and subscribe again.
+
+**Browsers:** connections that send an `Origin` header must come from app.paramx.xyz. Server-side clients send none.

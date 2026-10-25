@@ -1,0 +1,250 @@
+---
+title: "HTTP"
+description: "Every /v1 route: the exchange, instruments, markets, books, accounts, orders and funds."
+---
+
+The base is `https://api.paramx.xyz/v1` (devnet: `https://api.paramx.xyz/devnet/v1`). Formats and error codes are on [Conventions and errors](/api/conventions).
+
+## Exchange and markets
+
+### `GET /v1/exchange`
+
+Addresses and constants for building transactions and signing orders:
+
+```json
+{"api_version": "1", "network": "mainnet", "package": "0xd8fc…", "module": "paramx",
+ "exchange": "0xce8d…", "exchange_operator": "0x17e7…", "gas_sponsor": "0xf077…",
+ "original_package": "0x60f8…", "usdc_type": "0xdba3…::usdc::USDC", "usdc_decimals": 6,
+ "taker_fee_bps": 30, "maker_fee_bps": 0,
+ "price_decimals": 6, "amount_decimals": 6, "settlement_grace_seconds": 300}
+```
+
+- `package` is the contract version to call; `original_package` is what Move types are named by.
+- `exchange` is the `exchange_object_id` every order signs.
+- Only the taker pays the fee: on top of the price when buying, out of the proceeds when selling.
+
+### `GET /v1/instruments`
+
+The underlyings and their grids. `id` is a contract id's `underlying_id`. See [Instruments](/instruments).
+
+```json
+{"instruments": [{"id": 1, "symbol": "BTC", "name": "Bitcoin", "asset_class": "crypto",
+  "price_step_usd": "50", "price_decimals": 2, "listed": true,
+  "market_tz": "America/New_York", "market_hours": "",
+  "grids": [{"id": "1m", "time_step_seconds": 60, "price_step_usd": "50"},
+            {"id": "5m", "time_step_seconds": 300, "price_step_usd": "50"},
+            {"id": "1h", "time_step_seconds": 3600, "price_step_usd": "250"},
+            {"id": "1d", "time_step_seconds": 86400, "price_step_usd": "500"}]}]}
+```
+
+### `GET /v1/instruments/{id}/sessions?from=&to=`
+
+Open market sessions between `from` and `to` (epoch ms; default now to 7 days later; at most 14 days apart), as `[start_ms, end_ms]`, clipped to the range. An always-open instrument (all of today's crypto) returns `always_open: true` and the whole range as one session.
+
+```json
+{"instrument_id": 1, "from": 1790486236534, "to": 1791091036534, "always_open": true,
+ "sessions": [[1790486236534, 1791091036534]]}
+```
+
+### `GET /v1/instruments/{id}/price`
+
+The underlying's last trade:
+
+```json
+{"instrument_id": 1, "price": "84370.01", "size": "0.00044963", "side": "sell", "trade_id": "1099017880", "ts": 1790486235908}
+```
+
+### `GET /v1/contracts/{contract_id}`
+
+One tile: its fields, grid, status, and whether it can be traded now (the same check `POST /v1/orders` makes):
+
+```json
+{"contract_id": "3819…", "underlying_id": 1, "start": 1790488800000, "end": 1790492400000,
+ "min_strike": "84000", "max_strike": "84250", "grid": "1h", "status": "upcoming",
+ "tradable": true, "reason": null, "outcome": null}
+```
+
+- `status` is `upcoming`, `active`, `settling` or `settled`.
+- `reason`, when `tradable` is false, is `TILE_ENDED`, `MARKET_CLOSED` or `UNKNOWN_INSTRUMENT`.
+- `outcome` is `yes` (touched) or `no` once settled.
+
+### `GET /v1/markets?instrument_id=&grid=`
+
+Tradable tiles with resting orders, by instrument, then window, then strike:
+
+```json
+{"markets": [{"contract_id": "3819…", "underlying_id": 1, "start": 1790488800000, "end": 1790492400000,
+  "min_strike": "84000", "max_strike": "84250", "grid": "1h", "status": "upcoming", "orders": 2,
+  "best_bid": {"price": "0.989999", "amount": "4.201958"}, "best_ask": null}]}
+```
+
+### `GET /v1/books?instrument_id=&grid=`
+
+Every tradable book of an instrument (optionally one grid), as price levels with each book's `version`: the starting state for a whole-instrument `book` subscription.
+
+```json
+{"instrument_id": 1, "books": [{"contract_id": "3819…", "bids": [["0.4985", "42.3"]], "asks": [], "version": 1790500218490803}], "ts": 1790500218491}
+```
+
+### `GET /v1/books/{contract_id}`
+
+The book as price levels, best first. Each level is `[unit price, shares]`. Prices are rounded to 6 decimals away from the other side (bids down, asks up).
+
+```json
+{"contract_id": "3819…", "bids": [["0.43", "15"], ["0.41", "40"]], "asks": [["0.47", "10"]], "ts": 1790000000123}
+```
+
+### `GET /v1/trades?instrument_id=|contract_id=&limit=100`
+
+The public tape, newest first, at most 500. Trades are executed onchain, and have no addresses. The WebSocket's `trades` channel adds `taker_side`; this history doesn't record it.
+
+```json
+{"trades": [{"trade_id": "…", "contract_id": "3819…", "underlying_id": 1, "price": "0.6098",
+  "amount": "1", "total_price": "0.6098", "tx_digest": "AJKM…", "ts": 1790490157651}]}
+```
+
+## Accounts
+
+### `GET /v1/accounts/{address}`
+
+`trading_pubkey` (hex) and `cash` (USDC) are null if the address has no account.
+
+```json
+{"address": "0x4ba4…", "trading_pubkey": "8d39…", "cash": "5"}
+```
+
+### `GET /v1/accounts/{address}/orders`
+
+Resting orders, with what a cancel needs to sign:
+
+```json
+{"orders": [{"order_id": "…", "intent_id": "…", "nonce": "1234567890123", "side": "buy",
+  "contract_id": "3819…", "price": "0.43", "total_price": "4.3", "total_amount": "10",
+  "filled_amount": "0", "expiry": 1790000000000, "created_at": 1789996400000}]}
+```
+
+### `GET /v1/accounts/{address}/positions`
+
+`amount` is negative for a short. `market_value` is null when there's no price to value it at.
+
+```json
+{"positions": [{"contract_id": "3819…", "underlying_id": 1, "start": 1790000000000, "end": 1790000300000,
+  "min_strike": "109000", "max_strike": "109050", "amount": "10", "average_cost": "0.43", "market_value": "4.5"}]}
+```
+
+### `GET /v1/accounts/{address}/balance-history?from=&to=&points=300`
+
+The account's value over time: cash plus its open positions at market (a long's market value; a short's $1-a-share collateral less its buy-back cost). `from` and `to` are Unix ms (default: the last 7 days), and there are about `points` points, each the last value in its bucket. Deposits and withdrawals come as markers, so their jumps aren't read as profit or loss. A point is recorded on every cash change, and every 15 minutes while the account holds positions.
+
+```json
+{"points": [{"ts": 1790617256400, "cash": "500", "value": "500"}, {"ts": 1790617283148, "cash": "499.2", "value": "500"}],
+ "markers": [{"ts": 1790617256400, "type": "deposit", "amount": "500"}]}
+```
+
+### `GET /v1/accounts/{address}/fills?since=&until=&limit=100`
+
+The account's fills, newest first: every trade it was on either side of, between `since` (inclusive) and `until` (exclusive), both Unix ms, at most 500. For reconciling after a restart; live fills come as `fill` events on the [`account` channel](/api/account-events).
+
+```json
+{"fills": [{"trade_id": "d193…", "intent_id": "4a75…", "client_order_id": "mm-42", "contract_id": "3819…",
+  "side": "buy", "price": "0.015799", "amount": "1", "total_price": "0.015799", "tx_digest": "8xdw…", "ts": 1790500274946}]}
+```
+
+`intent_id` is the account's own order in the trade. Whether it was the maker or the taker isn't recorded here; the `fill` event's `role` says.
+
+### `GET /v1/accounts/{address}/history?limit=25&offset=0`
+
+One entry per contract traded, newest first:
+
+- `opened`: `long` or `short`;
+- `bought_amount`, `sold_amount`, `held_amount`, `total_cost`, `sold_proceeds`, `payout` and `realized_pnl`;
+- `outcome`: `open`, `under_review`, `won`, `lost` or `closed`;
+- `next_offset`: the offset of the next page, or null if this is the last.
+
+## Orders
+
+### `POST /v1/orders`
+
+```json
+{"side": "buy", "type": "limit", "user_address": "0x4ba4…", "contract_id": "3819…",
+ "total_price": "4.3", "total_amount": "10", "exchange_object_id": "0xce8d…",
+ "expiry": 1790000000000, "nonce": "1234567890123", "signature": "base64…",
+ "time_in_force": "gtc", "client_order_id": "mm-42"}
+```
+
+- **Fields:** see the [signing spec](/signing) for what each one means and what `signature` covers. A buy needs `total_price`, a sell needs `total_amount`, and a limit order needs both. The signed intent must carry exactly these values, in micro units.
+- **`time_in_force`** (limit orders; not signed):
+  - `gtc` (the default): whatever doesn't fill rests until `expiry`;
+  - `ioc`: whatever doesn't fill right away is dropped;
+  - `post_only`: refused with `WOULD_CROSS` if it would match anything, so it only ever makes liquidity.
+
+  Fill-or-kill isn't offered.
+- **`client_order_id`** (optional; 1–64 characters of `A–Z a–z 0–9 _ -`; not signed): your own id for the order, unique per account for 7 days. A repeat is refused with `DUPLICATE_CLIENT_ORDER_ID`, so retrying a request whose response you lost can never place twice. It's echoed in the response, `/orders`, and `order` and `fill` events.
+- **Self-trades:** an order never trades with your own resting order. If matching reaches one, it stops: the order keeps what it has filled, its remainder is cancelled rather than left resting against your order, and `reason` is `SELF_TRADE`.
+
+The response:
+
+```json
+{"intent_id": "…", "order_id": "…", "client_order_id": "mm-42", "status": "resting",
+ "filled_amount": "0", "resting_amount": "10", "reason": null}
+```
+
+- `status` is `filled`, `partially_filled`, `resting` or `cancelled` (an `ioc` or self-trade remainder).
+- `order_id` is the resting order, or null when nothing rests.
+- `reason` says why an order stopped short, such as `SELF_TRADE`, or a chain refusal after some fills.
+
+### `POST /v1/orders/batch`
+
+Up to 20 orders, each signed and validated on its own and placed in order. It isn't atomic: each result is `{"ok": true, …response…}` or `{"ok": false, "error": {"code", "message"}}`, in the same order.
+
+```json
+{"orders": [{"side": "buy", "type": "limit", "…": "an order, as above"}]}
+```
+
+### `POST /v1/orders/cancel`
+
+Give `intent_id` or `client_order_id`. The signature is over the order's `CancelOrderIntent` ([cancels](/signing#cancels-cancelorderintent)). The order leaves the book at once; nothing is recorded onchain. Returns `{"intent_id", "order_id", "client_order_id", "status": "cancelled"}`.
+
+```json
+{"user_address": "0x4ba4…", "intent_id": "…", "signature": "base64…"}
+```
+
+### `POST /v1/orders/cancel-all`, `POST /v1/orders/cancel-batch`
+
+These take many orders off the book at once, instantly, with one signed message ([bulk cancels](/signing#bulk-cancels)) and no chain transaction.
+
+```json
+{"user_address": "0x4ba4…", "contract_id": null, "nonce": "…", "expiry": 1790000030000, "signature": "base64…"}
+{"user_address": "0x4ba4…", "intent_ids": ["…"], "nonce": "…", "expiry": 1790000030000, "signature": "base64…"}
+```
+
+- **`cancel-all`** covers every resting order of the account, or one contract's with `contract_id` set.
+- **`cancel-batch`** covers up to 200 orders, by `intent_ids` or `client_order_ids`.
+- **`expiry`** is at most 60 seconds away, and each `nonce` works once (`NONCE_USED`).
+- **Returns** `{"cancelled": [{"intent_id", "order_id", "client_order_id"}]}`, plus a `cancelled` event for each order.
+
+## Funds
+
+### `POST /v1/trading-keys`, `POST /v1/deposits`
+
+These submit a gas-sponsored `new_trading_key_transfer` or `new_deposit_transfer` transaction, signed by the wallet key. The exchange's gas sponsor co-signs it and the operator accepts it. The [quickstart](/quickstart) describes both transactions. Returns `{"accepted": true}`.
+
+```json
+{"signed_transaction_b64": "…", "user_signature": "…"}
+```
+
+### `POST /v1/withdrawals`
+
+Moves `amount` USDC of cash to the account's own Sui address. The signature is over the [withdraw message](/signing#withdrawals). Returns `{"cash"}`, the cash left.
+
+```json
+{"user_address": "0x4ba4…", "amount": "5", "signature": "base64…"}
+```
+
+### `POST /v1/faucet` (devnet only)
+
+Mints 1,000 test USDC to the address's wallet, once a day per address.
+
+```json
+{"address": "0x4ba4…"}
+```

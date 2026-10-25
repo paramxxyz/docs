@@ -1,0 +1,57 @@
+---
+title: "Conventions and errors"
+description: "Version 1 of the ParamX API: bases, number formats, times and error codes."
+---
+
+Plain JSON over HTTP and WebSocket, for bots and other clients. The web app uses a separate internal API; this one is versioned, and fields documented here won't change meaning within `v1`.
+
+- **HTTP:** `https://api.paramx.xyz/v1`. The OpenAPI document is at [`/v1/openapi.json`](https://api.paramx.xyz/v1/openapi.json).
+- **WebSocket:** `wss://ws.paramx.xyz/v1`.
+- **Signing:** orders, cancels and withdrawals are signed by the account's trading key, as described in the [signing spec](/signing).
+
+**Devnet:** the same API at `https://api.paramx.xyz/devnet/v1` and `wss://ws.paramx.xyz/devnet/v1`, plus `POST /v1/faucet` `{"address": "0x…"}`. That mints 1,000 test USDC to the address's wallet, once a day per address; deposit it with `POST /v1/deposits`. Devnet is wiped about weekly and redeploys itself, after which accounts must be set up again.
+
+## Formats
+
+- **Big integers** (contract ids, nonces) are decimal strings.
+- **Prices and amounts** are decimal strings in USDC and shares, with at most 6 decimals, e.g. `"0.43"`, `"10"`. Onchain, the same values are micro units.
+- **Times** are Unix milliseconds, except the tile window inside a contract id, which is in seconds.
+- **Addresses** are `0x` followed by 64 hex digits.
+
+## Errors
+
+Errors return a non-2xx status and a body like this. Match on `code`; the message is for humans.
+
+```json
+{"error": {"code": "MARKET_CLOSED", "message": "..."}}
+```
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `INVALID_INPUT` | 400 | the request doesn't match the schema; `message` says where |
+| `INVALID_AMOUNT` | 400 | a price or amount has more than 6 decimals, is zero, or is too large |
+| `INVALID_SIGNATURE` | 401 | the signature doesn't verify against the registered trading key |
+| `KEY_NOT_REGISTERED` | 400 | the address has no trading key |
+| `INTENT_EXPIRED` | 400 | `expiry` has passed (or the chain found the order expired) |
+| `WRONG_EXCHANGE` | 400 | `exchange_object_id` isn't this exchange |
+| `TILE_ENDED` | 400 | the tile's window is over |
+| `MARKET_CLOSED` | 400 | the tile's window is entirely outside the underlying's market hours |
+| `UNKNOWN_INSTRUMENT` | 400/404 | no such instrument |
+| `NOTHING_FILLED` | 400 | a market order found nothing to fill |
+| `WOULD_CROSS` | 400 | a `post_only` order would have matched |
+| `SELF_TRADE` | 400 | the order reached your own resting order ([self-trades](/api/http#post-v1orders)) |
+| `INSUFFICIENT_CASH` | 400 | the chain refused the fill: not enough cash (or collateral for a short) |
+| `INTENT_FILLED` | 400 | the chain refused the fill: an intent has nothing left of its signed amount |
+| `PRICE_MISMATCH` | 400 | the chain refused the fill: the prices don't cross |
+| `CHAIN_REJECTED` | 400 | the chain refused the fill for another reason |
+| `DUPLICATE_CLIENT_ORDER_ID` | 400 | this account already used the `client_order_id` |
+| `INTENT_NOT_FOUND`, `ORDER_NOT_OPEN` | 404 | cancel: no such order, or it isn't resting |
+| `TOO_MANY_ORDERS` | 400 | a batch is over its limit |
+| `NONCE_USED` | 400 | a bulk cancel's nonce was already used |
+| `SPONSOR_REJECTED` | 400 | the gas sponsor pays only for trading-key registrations and deposits |
+| `NO_QUOTE`, `QUOTES_UNAVAILABLE` | 400/503 | RFQ (block trades): no quote, or the market maker is unreachable |
+| `REGION_RESTRICTED` | 403 | placing orders and deposits isn't available from the caller's region |
+| `RATE_LIMITED` | 429 | over 300 requests a minute from one IP |
+| `INTERNAL` | 500 | a server error |
+
+More codes may be added: treat an unknown one as a rejection and read `message`.

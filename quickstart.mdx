@@ -1,0 +1,88 @@
+---
+title: "Quickstart"
+description: "The steps a bot takes, as API calls, from keys to a first order."
+---
+
+Paths are relative to the HTTP base: `https://api.paramx.xyz/v1` on mainnet, or `https://api.paramx.xyz/devnet/v1` on devnet. Start on devnet: it's the same API with free test USDC.
+
+<Tip>
+  `paramx-setup`, the CLI in [nautilus-paramx](https://github.com/paramxxyz/nautilus-paramx), does steps 2 to 5 for you: `paramx-setup keys && paramx-setup register`, then `paramx-setup deposit 100`.
+</Tip>
+
+<Steps>
+  <Step title="Read the exchange's settings">
+    `GET /v1/exchange` returns the package to call, the exchange object every order signs, the exchange operator, the gas sponsor and the USDC type ([details](/api/http#get-v1exchange)). Read them at startup rather than hard-coding them: they differ between mainnet and devnet, and devnet's change after every wipe.
+  </Step>
+
+  <Step title="Make two keys">
+    A bot account has two Ed25519 keys:
+
+    - **The wallet key** is the account's Sui address. It holds your USDC on Sui, and signs the two transactions that set the account up.
+    - **The trading key** signs orders, cancels and withdrawals. It can't move funds anywhere except back to the wallet address.
+
+    <Warning>Keep both secret. Anyone with the trading key can trade your account.</Warning>
+  </Step>
+
+  <Step title="Register the trading key">
+    Build a Sui transaction whose only command is a call to `{package}::paramx::new_trading_key_transfer` with:
+
+    | Argument | Value |
+    | --- | --- |
+    | `trading_pubkey` | the trading key's 32-byte public key, as `vector<u8>` |
+    | `expiry` | Unix ms, e.g. an hour from now |
+    | `nonce` | a random u64 |
+    | `exchange_operator` | `exchange_operator` from `/v1/exchange` |
+
+    The wallet address is the sender, and the exchange's `gas_sponsor` pays the gas: set it as the gas owner, with one of its SUI coins as the gas payment (look them up on Sui, e.g. with its GraphQL API) and a budget of 0.1 SUI. Sign it with the wallet key, the usual Sui way, and post it:
+
+    ```http
+    POST /v1/trading-keys
+    {"signed_transaction_b64": "<base64 BCS TransactionData>", "user_signature": "<base64 Sui signature>"}
+    ```
+
+    The sponsor co-signs and the operator registers the key. It costs you no SUI. `GET /v1/accounts/{address}` then shows `trading_pubkey`. Registering again replaces the key; orders signed with the old one stop being accepted.
+  </Step>
+
+  <Step title="Get USDC">
+    On devnet, call the faucet: `POST /v1/faucet` `{"address": "0x…"}`. On mainnet, send USDC on Sui to the wallet address.
+  </Step>
+
+  <Step title="Deposit">
+    The same way, with a call to `{package}::paramx::new_deposit_transfer<USDC>` taking a USDC coin of exactly the amount to deposit, and `exchange_operator`. Split the coin off your USDC in the same transaction (`SplitCoins`, after `MergeCoins` if you need to combine several). Post it to `POST /v1/deposits`. The amount becomes exchange cash: `GET /v1/accounts/{address}` → `cash`.
+
+    The sponsor co-signs only these two shapes of transaction (`SPONSOR_REJECTED` otherwise).
+  </Step>
+
+  <Step title="Find a market and watch it">
+    - `GET /v1/instruments` lists the underlyings and their grids.
+    - `GET /v1/markets?instrument_id=1` lists BTC's tiles with resting orders, with their best bid and ask ([finding liquidity](/instruments#finding-liquidity)).
+    - On the WebSocket, subscribe to `book` for some contracts, or for a whole instrument ([WebSocket](/api/websocket)):
+
+    ```json
+    {"op": "subscribe", "channel": "book", "instrument_ids": [1]}
+    ```
+  </Step>
+
+  <Step title="Place an order">
+    An order is a BCS-encoded `BuyerOrderIntent` or `SellerOrderIntent`, signed with the trading key: raw Ed25519 over the bytes, no prefix and no hashing ([order intents](/signing#order-intents)). Send the same values with the signature:
+
+    ```json POST /v1/orders
+    {"side": "buy", "type": "limit", "user_address": "0x…", "contract_id": "3819…",
+     "total_price": "4.3", "total_amount": "10", "exchange_object_id": "0x…",
+     "expiry": 1790000000000, "nonce": "1234567890123", "signature": "base64…",
+     "time_in_force": "post_only", "client_order_id": "mm-1"}
+    ```
+
+    That's 10 shares for $4.30 in total, $0.43 each. The response says what filled and what rests ([POST /v1/orders](/api/http#post-v1orders)). Check your encoding against the [test vectors](https://github.com/paramxxyz/nautilus-paramx/blob/main/vectors/signing.json) before trading.
+  </Step>
+
+  <Step title="Follow your account">
+    Subscribe to your account's events:
+
+    ```json
+    {"op": "subscribe", "channel": "account", "addresses": ["0x…"]}
+    ```
+
+    You get an event for each order, fill, position change, cash change and settlement ([account events](/api/account-events)). Nothing is replayed: after connecting, read `/v1/accounts/{address}`, `/orders` and `/positions`, then apply events.
+  </Step>
+</Steps>

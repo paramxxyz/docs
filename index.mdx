@@ -1,0 +1,57 @@
+---
+title: "Trading on ParamX from your own code"
+sidebarTitle: "Introduction"
+description: "A public HTTP and WebSocket API for bots, market makers and integrators."
+---
+
+ParamX has a public API for bots: plain JSON over HTTP and WebSocket, the same on mainnet and on the devnet exchange. Anything that can make HTTP requests and Ed25519 signatures can use it.
+
+- **What you trade:** tiles. A tile is a contract on an underlying (BTC, ETH, SOL…), a time window and a price range. A share pays $1 if the underlying trades inside the range during the window, and $0 otherwise ([instruments](/instruments)).
+- **What you can build:** market makers that quote tiles, takers that trade against the book, and tools that watch the book, the public tape and your account in real time.
+- **Where your money is:** in the exchange's contract on Sui. Every trade is settled onchain, checked against signatures made by your own key.
+
+| | Mainnet | Devnet |
+| --- | --- | --- |
+| HTTP | `https://api.paramx.xyz/v1` | `https://api.paramx.xyz/devnet/v1` |
+| WebSocket | `wss://ws.paramx.xyz/v1` | `wss://ws.paramx.xyz/devnet/v1` |
+| USDC | real USDC on Sui | test USDC from `POST /v1/faucet` |
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Set up an account and place a first order, step by step.
+  </Card>
+  <Card title="HTTP API" icon="code" href="/api/http">
+    Every route: the exchange, markets, books, accounts and orders.
+  </Card>
+  <Card title="Signing" icon="signature" href="/signing">
+    Exactly what the trading key signs, byte for byte.
+  </Card>
+  <Card title="Nautilus Trader" icon="robot" href="/nautilus">
+    Run Nautilus strategies on ParamX.
+  </Card>
+</CardGroup>
+
+## Start on devnet
+
+The devnet exchange runs the same code and the same API, on Sui devnet, with worthless USDC:
+
+- **Free USDC:** `POST /v1/faucet` `{"address": "0x…"}` mints 1,000 test USDC to the address's wallet, once a day per address.
+- **Real prices:** it uses mainnet's price feeds, so tiles settle the same way.
+- **Weekly wipes:** Sui devnet is wiped about weekly, and the exchange redeploys itself within about half an hour. Accounts, cash, orders and positions are gone after a wipe; register, get USDC and deposit again. Your keys still work.
+- **No market maker:** books only have what other bots put there.
+
+## Rules and limits
+
+- **Fees:** the taker pays 0.30% of the price; makers pay nothing.
+- **Cancels** are instant and take the order off the book; they send no chain transaction. A cancelled order's signed intent stays valid onchain until its expiry, but only the operator can submit fills, and only from the book. Use short expiries to keep that window small ([cancels](/signing#cancels-cancelorderintent)).
+- **Self-trades:** an order never trades with your own resting order.
+- **Rate limits:** 300 HTTP requests a minute and 20 WebSocket connections per IP (`RATE_LIMITED`).
+- **Errors** carry a stable `code` to match on ([errors](/api/conventions#errors)).
+
+## Open source
+
+On GitHub at [github.com/paramxxyz](https://github.com/paramxxyz):
+
+- **[nautilus-paramx](https://github.com/paramxxyz/nautilus-paramx):** `paramx-client`, a Rust client for the API, order signing and account setup; `paramx-setup`, a CLI that creates and funds a bot account; and the [Nautilus Trader adapter](/nautilus).
+- **[public-contracts](https://github.com/paramxxyz/public-contracts):** the exchange's Move interface on Sui: its types, the signed message formats and the functions integrators call, with the mainnet addresses.
+- **[Test vectors](https://github.com/paramxxyz/nautilus-paramx/blob/main/vectors/signing.json):** a worked example of every signed message.

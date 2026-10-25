@@ -1,0 +1,45 @@
+---
+title: "Account events"
+description: "Orders, fills, positions, cash and settlements on the account channel, as they happen."
+---
+
+The `account` channel pushes what happens to an account, in order, as it happens. Accounts are public onchain and through the REST routes, so subscribing needs no login.
+
+```json
+{"op": "subscribe", "channel": "account", "addresses": ["0x4ba4…"]}
+```
+
+Every event has `channel: "account"`, `type`, `address`, `id` (unique; use it to drop duplicates) and `ts` (epoch ms), plus:
+
+| `type` | Fields | When |
+| --- | --- | --- |
+| `order` | `status`, `intent_id`, `order_id`, `client_order_id`, `side`, `contract_id`, `price`, `total_amount`, `filled_amount`, `resting_amount` | an order placed through the API: `resting`, `filled` or `partially_filled` when placed; `cancelled`; `expired` (up to a minute after its expiry) |
+| `fill` | `trade_id`, `intent_id`, `client_order_id`, `contract_id`, `side`, `role` (`maker` / `taker`), `price`, `amount`, `total_price`, `tx_digest` | each trade the chain executes, once for each side |
+| `position` | `contract_id`, `amount` (signed; negative is short) | after each fill |
+| `balance` | `cash` | after fills, deposits, withdrawals and settlements |
+| `settlement` | `contract_id`, `outcome` (`yes` / `no`), `amount`, `payout` (the cash credited) | when a tile the account held settles |
+
+```json
+{"channel": "account", "type": "fill", "id": "de10…", "address": "0x4ba4…", "ts": 1790486821609,
+ "trade_id": "8545…", "intent_id": "18a3…", "contract_id": "3819…", "side": "buy", "role": "taker",
+ "price": "0.0203", "amount": "1", "total_price": "0.0203", "tx_digest": "57k3…"}
+```
+
+- **Resting orders** get `fill` events. Only the order just placed gets an `order` event with its fill status; count a resting order's fills against its `total_amount` to know when it's done.
+- **Unknown `type` values** may be added: ignore them.
+
+## Starting and reconnecting
+
+Nothing is replayed. To start, or after reconnecting:
+
+<Steps>
+  <Step title="Subscribe">
+    Subscribe to the `account` channel for the address.
+  </Step>
+  <Step title="Read the current state">
+    Read `GET /v1/accounts/{address}`, `/orders` and `/positions`.
+  </Step>
+  <Step title="Apply events">
+    Apply events from then on, dropping any whose `id` you've seen.
+  </Step>
+</Steps>

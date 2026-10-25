@@ -1,0 +1,65 @@
+---
+title: "Instruments, tiles and grids"
+sidebarTitle: "Instruments"
+description: "What a bot can trade on ParamX, and how to find where the liquidity is."
+---
+
+## Tiles
+
+A **tile** is one contract. It covers:
+- an **underlying** (an instrument: BTC, ETH, SOL…);
+- a **time window** `[start, end)`;
+- a **price range** `[min_strike, max_strike)`.
+
+A share pays **$1 if the underlying trades inside the range during the window**, and $0 otherwise. So share prices are between 0 and 1. The tile's id packs those five fields into a u256 ([contract ids](/signing#contract-ids)); `GET /v1/contracts/{id}` decodes it.
+
+Listed today: BTC, ETH, SOL, XRP, HYPE and ZEC, all against USD.
+
+## Grids
+
+The exchange accepts any tile, but the market maker quotes, and liquidity gathers, on each instrument's **grids** (`GET /v1/instruments` → `grids`):
+
+| Grid | Window | Price step |
+| --- | --- | --- |
+| `1m` | 60 s | the instrument's `price_step_usd` (BTC: $50) |
+| `5m` | 300 s | the same step (BTC: $50) |
+| `1h` | 3,600 s | 5 × that step (BTC: $250) |
+| `1d` | 86,400 s | 10 × that step (BTC: $500) |
+
+A grid tile starts on a multiple of the window (Unix seconds), and its range starts on a multiple of the price step. For BTC's 5m tile at time `t` and price `p`:
+
+```text
+start      = t - t % 300             end        = start + 300
+min_strike = floor(p / 50) * 50      max_strike = min_strike + 50
+```
+
+Pack those into a [contract id](/signing#contract-ids), with the strikes in micro USD.
+
+## Market hours
+
+Each instrument has weekly market hours (`market_hours`, in `market_tz`). Crypto is always open (`""`), so every listed instrument today trades around the clock.
+
+`GET /v1/instruments/{id}/sessions?from=&to=` turns market hours into absolute `[start_ms, end_ms]` sessions, up to 14 days at a time. A tile whose window doesn't overlap any session can't see a trade, so the exchange refuses it (`MARKET_CLOSED`).
+
+## Is a tile tradable?
+
+`GET /v1/contracts/{id}` gives the same answer `POST /v1/orders` enforces:
+
+- **`status`:**
+  - `upcoming`: the window hasn't started;
+  - `active`: it's running;
+  - `settling`: it has ended and is within the settlement grace period (`GET /v1/exchange` → `settlement_grace_seconds`);
+  - `settled`: past that.
+- **`tradable` and `reason`:** `TILE_ENDED` (the window has ended), `MARKET_CLOSED` (the window lies entirely in closed hours) or `UNKNOWN_INSTRUMENT`. Active tiles can still be traded.
+- **`outcome`:** `yes` (touched) or `no`, once the tile has settled.
+
+## Finding liquidity
+
+`GET /v1/markets?instrument_id=&grid=` lists the tradable tiles that have resting orders, with each one's best bid and ask and its order count. It's the starting point for a liquidity provider. Stream any of them with the `book` or `top_of_book` [WebSocket channels](/api/websocket).
+
+## The underlying's price
+
+- `GET /v1/instruments/{id}/price` returns the last trade.
+- The `underlying_trades` WebSocket channel streams every trade.
+
+Prices come from the exchange's own feed of Coinbase spot trades. Settlement uses the same prices.

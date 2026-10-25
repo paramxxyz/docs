@@ -1,0 +1,158 @@
+---
+title: "Signing"
+description: "Everything a ParamX bot signs, byte for byte."
+---
+
+[`vectors/signing.json`](https://github.com/paramxxyz/nautilus-paramx/blob/main/vectors/signing.json) has a worked example of each message: key, inputs, bytes and signature. The exchange's server and the Rust client are both tested against that file; test yours against it too.
+
+## Keys and signatures
+
+An account has two Ed25519 keys (see the [quickstart](/quickstart)):
+
+| Key | Signs | How |
+| --- | --- | --- |
+| Wallet key (the Sui address) | Sui transactions: trading key registration and deposits | Sui's scheme: intent-prefixed, Blake2b digest. Use a Sui SDK. |
+| Trading key | Orders, cancels, withdrawals | **Raw Ed25519 over the message bytes.** No Sui intent prefix, no hashing. |
+
+The signature is sent base64-encoded (standard alphabet, with padding): 64 bytes, so 88 characters. The trading key's public key is the raw 32 bytes, registered onchain with `new_trading_key_transfer`.
+
+## Units
+
+- **Micro units.** Prices and amounts onchain are integers with 6 implied decimals, like USDC: 1 USDC is `1000000`, and 2.5 shares is `2500000`. The `/v1` API takes the same values as decimal strings with at most 6 decimals (`"1"`, `"2.5"`).
+- **Shares.** A share pays $1 if the underlying's price touches the tile's price range during its time window, and $0 otherwise. So share prices are between 0 and 1 USDC.
+- **Prices are totals.** An order carries a total price (USDC) and a total amount (shares). Its unit price is `total_price / total_amount`.
+
+## Contract ids
+
+A tile is identified by a u256, sent as a decimal string:
+
+| Bits | Field | Type | Unit |
+| --- | --- | --- | --- |
+| 255–224 | `underlying_id` | u32 | the instrument id (`GET /v1/instruments`) |
+| 223–192 | `start_active_ts` | u32 | window start, Unix seconds |
+| 191–160 | `end_active_ts` | u32 | window end, Unix seconds |
+| 159–96 | `max_strike` | u64 | top of the price range, micro USD |
+| 95–32 | `min_strike` | u64 | bottom of the price range, micro USD |
+| 31–0 | (zero) | | |
+
+```text
+id = underlying_id << 224 | start << 192 | end << 160 | max_strike << 96 | min_strike << 32
+```
+
+Example (in the vectors): BTC (instrument 1), from `1790000000` to `1790000300` (a 5-minute window), $109,000 to $109,100:
+
+```text
+min_strike = 109000000000, max_strike = 109100000000
+id = 38195958776108886731205885586060617400434196320124015824815853142016
+```
+
+## Order intents
+
+An order is the BCS encoding of one of the contract's Move structs. The contract checks its signature onchain, against the account's registered trading key, every time the order fills.
+
+**BCS rules used here:**
+- fields are laid out in order, with no padding and no length prefixes;
+- an `address` is its 32 bytes;
+- `u64` is 8 bytes little-endian, and `u256` is 32 bytes little-endian;
+- `Option<u64>` is `00` for none, or `01` followed by the 8-byte value.
+
+### Buy: `BuyerOrderIntent`
+
+| # | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 1 | `user` | `address` | the account (wallet address) |
+| 2 | `total_price` | `u64` | the most the order spends, micro USDC |
+| 3 | `total_amount` | `Option<u64>` | the most shares it buys, micro; **none for a market buy** |
+| 4 | `contract_id` | `u256` | the tile |
+| 5 | `exchange_object_id` | `address` | the exchange (`GET /v1/exchange` → `exchange`) |
+| 6 | `expiry` | `u64` | Unix ms; fills must happen before it |
+| 7 | `nonce` | `u64` | random; see [nonces](#nonces-and-replay) |
+
+It is 129 bytes, or 121 for a market buy.
+
+### Sell: `SellerOrderIntent`
+
+| # | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 1 | `user` | `address` | the account |
+| 2 | `contract_id` | `u256` | the tile |
+| 3 | `total_amount` | `u64` | shares to sell, micro |
+| 4 | `total_price` | `Option<u64>` | the least it takes in, micro USDC; **none for a market sell** |
+| 5 | `exchange_object_id` | `address` | the exchange |
+| 6 | `expiry` | `u64` | Unix ms |
+| 7 | `nonce` | `u64` | random |
+
+It is 129 bytes, or 121 for a market sell. Selling more than you hold opens a short, which locks $1 of cash per share as collateral.
+
+### Limit and market orders
+
+- **Limit** (`"type": "limit"` in `POST /v1/orders`): both `total_price` and `total_amount` are set. Whatever doesn't fill right away rests on the book, at unit price `total_price / total_amount`.
+- **Market:** the optional field is none. A market buy spends up to `total_price` at any price; a market sell sells `total_amount` at any price. Nothing rests, and the order is rejected if nothing fills.
+
+### What the contract checks on each fill
+
+- Both signatures verify against the two accounts' registered trading keys.
+- Both intents name this exchange, and the fill happens before both expiries.
+- The two orders are on the same `contract_id` and belong to different accounts.
+- The prices cross: `buyer.total_price × seller.total_amount ≥ seller.total_price × buyer.total_amount`.
+- Neither intent fills past what it signed. The contract records the amount filled per account and nonce.
+
+**The fee** is 0.30% (`taker_fee_bps`), paid only by the taker, the order that fills against a resting one. A taking buyer pays it on top of the price: a buy's signed `total_price` bounds the price paid, and the fee comes on top. A taking seller pays it out of its proceeds. Makers pay nothing.
+
+## Cancels: `CancelOrderIntent`
+
+A cancel repeats the order's own fields:
+
+| # | Field | Type | Value |
+| --- | --- | --- | --- |
+| 1 | `user` | `address` | the account |
+| 2 | `order_max_amount` | `u64` | the order's `total_amount` |
+| 3 | `order_nonce` | `u64` | the order's `nonce` |
+| 4 | `exchange_object_id` | `address` | the order's exchange |
+| 5 | `expiry` | `u64` | the order's `expiry` |
+
+It is 88 bytes. The server checks that it matches the stored order, then takes the order off the book. Nothing is recorded onchain: the signed intent stays valid until its expiry, but only the operator can submit fills, and it only fills orders on the book (see the trust note under [bulk cancels](#bulk-cancels)). Only a limit order that is resting can be cancelled, and only before its expiry. `GET /v1/accounts/{address}/orders` returns each resting order's nonce and expiry, so a bot can cancel orders it placed before a restart.
+
+## Bulk cancels
+
+`POST /v1/orders/cancel-all` and `/cancel-batch` take many orders off the book with one signature, over the UTF-8 bytes of exactly this JSON (no spaces, keys in this order):
+
+```json
+{"scope":"cancel_all","address":"0x…","contract_id":null,"nonce":"42","expiry":1790000030000}
+{"scope":"cancel_all","address":"0x…","contract_id":"3819…","nonce":"43","expiry":1790000030000}
+{"scope":"cancel_batch","address":"0x…","intent_ids":["9c40d288-…","6d3a842a-…"],"nonce":"44","expiry":1790000030000}
+```
+
+- `contract_id` is a decimal string, or `null` for all contracts.
+- `intent_ids` are the orders' intent ids, in the order sent. With `client_order_ids`, the server looks them up first, so still sign intent ids.
+- `nonce` is a random u64, as a string, and can be used once.
+- `expiry` is Unix ms, at most 60 s ahead.
+
+The vectors include one of each.
+
+<Note>
+  **Trust:** a bulk cancel only takes orders off the book; it sends no chain transaction. An order cancelled this way still has a valid signed intent onchain until its expiry, but only the operator can submit fills, and it only fills from the book. The same holds for a single cancel. To limit that exposure, use short expiries.
+</Note>
+
+## Withdrawals
+
+A withdrawal moves exchange cash to the account's own Sui address. The trading key signs the UTF-8 bytes of exactly this JSON, with no spaces and the keys in this order:
+
+```json
+{"scope":"withdraw","amount":"5000000","type":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","address":"0x…"}
+```
+
+- `amount` is micro USDC, as a string;
+- `type` is the USDC coin type (`GET /v1/exchange` → `usdc_type`);
+- `address` is the account.
+
+<Warning>
+  The message has no nonce or expiry yet, so a signed withdrawal could be replayed. The funds can only ever go to the account's own address; a nonce and an expiry are planned.
+</Warning>
+
+## Nonces and replay
+
+- **Pick every nonce at random** from the full u64 range, and never reuse one. The contract keeps one table of nonces per account, shared by orders and trading-key registrations. A reused nonce continues the old intent's fill count, or is rejected.
+- **A nonce's record can be deleted once its expiry has passed.** By then the intent itself is expired, so it can't fill again.
+- **Expiry** is Unix milliseconds and must be in the future. There is no maximum today; an hour is typical.
+- **Signatures bind the exchange object**, so an intent can't be used on another deployment.

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "ParamX Developers",
+  "description": "The ParamX trading API: HTTP and WebSocket for bots, market makers and integrators, with order signing and the Nautilus Trader adapter.",
+  "colors": {
+    "primary": "#1D4BB8",
+    "light": "#7AA2FF",
+    "dark": "#1D4BB8"
+  },
+  "favicon": "/logo/mark.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://paramx.xyz"
+  },
+  "navbar": {
+    "links": [
+      { "label": "GitHub", "href": "https://github.com/paramxxyz" },
+      { "label": "Support", "href": "mailto:support@paramx.xyz" }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get the app",
+      "href": "https://apps.apple.com/us/app/paramx-markets/id6817622608"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "quickstart"]
+      },
+      {
+        "group": "API",
+        "pages": ["api/conventions", "api/http", "api/websocket", "api/account-events"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["signing", "instruments"]
+      },
+      {
+        "group": "Tools",
+        "pages": ["nautilus"]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/paramx_xyz",
+      "github": "https://github.com/paramxxyz",
+      "discord": "https://discord.gg/bP2vtSsewz"
+    }
+  }
+}
